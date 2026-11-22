@@ -1,4 +1,4 @@
-﻿param(
+param(
   [Parameter(Mandatory=$true)][string]$Url,
   [string]$ListKey = "",
   [string]$Campo = "",
@@ -6,9 +6,13 @@
   [string]$Titulo = "Lista API",
   [string]$Campos = "",      # campos a mostrar en detalle, separados por coma
   [string]$Ocultar = "",     # campos a ocultar en detalle, separados por coma
-  [int]$MaxPaginas = 5,      # sigue paginaciÃ³n "next" hasta este lÃ­mite
+  [int]$MaxPaginas = 5,      # sigue paginacion next/cursor hasta este limite
   [switch]$Elegir,           # selector visual en terminal para elegir campos
-  [string[]]$Header = @()    # headers HTTP, ej: -Header "Authorization: Bearer TOKEN"
+  [string[]]$Header = @(),   # headers HTTP, ej: -Header "Authorization: Bearer TOKEN"
+  [string]$DetalleUrl = "",  # URL de detalle por item, usa {id} o {url}
+  [switch]$AiFallback,       # fallback IA estricto solo si falla analyze o se pide explicito
+  [string]$EnvFile = "",     # ruta .env con DEEPSEEK_API_KEY (default: busca .env cerca)
+  [string]$AiModelo = "deepseek-chat"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +29,83 @@ Write-Host "Paquete: $pkg"
 $headersHt = @{}
 foreach ($h in $Header) {
   if ($h -match '^\s*([^:]+):\s*(.*)$') { $headersHt[$Matches[1].Trim()] = $Matches[2].Trim() }
+}
+
+function Get-AiApiKey {
+  if ($env:DEEPSEEK_API_KEY) { return $env:DEEPSEEK_API_KEY }
+  $candidates = @()
+  if ($EnvFile) { $candidates += $EnvFile }
+  $candidates += (Join-Path $root '.env')
+  $candidates += 'C:\Users\Nestor\Desktop\.env'
+  $candidates += 'C:\Users\Nestor\Downloads\.env'
+  foreach ($p in $candidates) {
+    if ($p -and (Test-Path $p)) {
+      foreach ($line in Get-Content $p) {
+        if ($line -match '^\s*DEEPSEEK_API_KEY\s*=\s*(.+)\s*$') { return $Matches[1].Trim().Trim('"').Trim("'") }
+      }
+    }
+  }
+  return $null
+}
+
+function Invoke-AiFallback {
+  param([string]$Reason, [string]$SampleJson, [string]$AnalyzeOutput)
+  $key = Get-AiApiKey
+  if (-not $key) { Write-Host "[AI] No se encontro DEEPSEEK_API_KEY; omitiendo fallback." -ForegroundColor Yellow; return $false }
+  Write-Host "[AI] Fallback estricto activado: $Reason" -ForegroundColor Yellow
+
+  $allowed = @('lib/models/item.dart','lib/services/api_service.dart','lib/screens/lista_screen.dart','lib/screens/detalle_screen.dart','lib/main.dart')
+  $existing = @{}
+  foreach ($a in $allowed) { if (Test-Path $a) { $existing[$a] = Get-Content $a -Raw } }
+
+  $sys = @"
+Eres un reparador estricto de código Flutter. Devuelve SOLO un objeto JSON válido.
+Claves permitidas únicamente: lib/models/item.dart, lib/services/api_service.dart, lib/screens/lista_screen.dart, lib/screens/detalle_screen.dart, lib/main.dart.
+No incluyas otras claves, no incluyas markdown, no incluyas explicaciones, no incluyas comandos shell.
+El código debe ser Dart válido y pasar dart analyze. Mantén cambios mínimos necesarios.
+"@
+  $user = @"
+URL: $Url
+Motivo: $Reason
+Muestra JSON (recortada):
+$SampleJson
+
+Salida dart analyze:
+$AnalyzeOutput
+
+Archivos actuales (JSON):
+$($existing | ConvertTo-Json -Depth 4)
+"@
+  $body = @{
+    model = $AiModelo
+    temperature = 0
+    messages = @(
+      @{ role = 'system'; content = $sys },
+      @{ role = 'user'; content = $user }
+    )
+  } | ConvertTo-Json -Depth 8
+
+  try {
+    $resp = Invoke-RestMethod -Uri 'https://api.deepseek.com/chat/completions' -Method Post -Headers @{ Authorization = "Bearer $key"; 'Content-Type' = 'application/json' } -Body $body
+    $content = $resp.choices[0].message.content
+    if (-not $content) { Write-Host "[AI] Respuesta vacia." -ForegroundColor Yellow; return $false }
+    $content = $content.Trim()
+    if ($content.StartsWith('```')) { $content = ($content -replace '^```[a-zA-Z]*\s*','' -replace '\s*```$','').Trim() }
+    $patch = $content | ConvertFrom-Json
+    $props = @($patch.PSObject.Properties.Name)
+    foreach ($p in $props) { if ($allowed -notcontains $p) { Write-Host "[AI] Clave no permitida: $p. Rechazado." -ForegroundColor Red; return $false } }
+    if ($props.Count -eq 0) { Write-Host "[AI] Sin archivos en respuesta." -ForegroundColor Yellow; return $false }
+    foreach ($p in $props) {
+      $dir = Split-Path -Parent $p
+      if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+      Set-Content -Path $p -Value ([string]$patch.$p) -Encoding UTF8
+      Write-Host "[AI] Escribio $p"
+    }
+    return $true
+  } catch {
+    Write-Host "[AI] Error en fallback: $($_.Exception.Message)" -ForegroundColor Yellow
+    return $false
+  }
 }
 
 Write-Host "[1/5] Leyendo API..."
@@ -410,6 +491,28 @@ void main() {
 Set-Content -Path "test\widget_test.dart" -Value $test -Encoding UTF8
 
 Write-Host "[4/5] Analizando..."
-dart analyze
-Write-Host "[5/5] Listo. Corre: flutter run -d chrome"
-
+$analyzeOut = (dart analyze 2>&1 | Out-String)
+Write-Host $analyzeOut
+if ($analyzeOut -match 'No issues found') {
+  Write-Host "[5/5] Listo. Corre: flutter run -d chrome"
+} else {
+  if ($AiFallback) {
+    $sample = ($json | ConvertTo-Json -Depth 6 -Compress)
+    if ($sample.Length -gt 6000) { $sample = $sample.Substring(0,6000) + '...(recortado)' }
+    $ok = Invoke-AiFallback -Reason 'dart analyze fallo' -SampleJson $sample -AnalyzeOutput $analyzeOut
+    if ($ok) {
+      Write-Host "[4b/5] Re-analizando tras fallback IA..."
+      $analyzeOut2 = (dart analyze 2>&1 | Out-String)
+      Write-Host $analyzeOut2
+      if ($analyzeOut2 -match 'No issues found') {
+        Write-Host "[5/5] Listo (con fallback IA). Corre: flutter run -d chrome"
+      } else {
+        Write-Host "[5/5] Fallback IA aplicado pero aun hay issues. Revisa manualmente." -ForegroundColor Yellow
+      }
+    } else {
+      Write-Host "[5/5] Generado con issues. Fallback IA no aplicado." -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host "[5/5] Generado con issues. Puedes reintentar con -AiFallback (estricto)." -ForegroundColor Yellow
+  }
+}
