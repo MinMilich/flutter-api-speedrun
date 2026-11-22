@@ -82,13 +82,20 @@ flutter pub add http | Out-Null
 Write-Host "[3/5] Creando archivos..."
 New-Item -ItemType Directory -Force -Path "lib\models","lib\services","lib\screens","test" | Out-Null
 
-# Imagen: puede ser ruta relativa (simpsons) o URL completa
+# Imagen: puede ser ruta relativa (simpsons), URL completa, o objeto con medium/original/url
 $imgGetter = "''"
 if ($imgField) {
   $imgGetter = @"
 () {
     final v = json['__IMG__'];
     if (v == null) return '';
+    if (v is Map) {
+      final m = Map<String, dynamic>.from(v);
+      final s = (m['original'] ?? m['medium'] ?? m['large'] ?? m['small'] ?? m['url'] ?? m['src'] ?? '').toString();
+      if (s.startsWith('http')) return s;
+      if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500${s}';
+      return s;
+    }
     final s = v.toString();
     if (s.startsWith('http')) return s;
     if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500${s}';
