@@ -159,12 +159,12 @@ if ($imgField) {
       final m = Map<String, dynamic>.from(v);
       final s = (m['original'] ?? m['medium'] ?? m['large'] ?? m['small'] ?? m['url'] ?? m['src'] ?? '').toString();
       if (s.startsWith('http')) return s;
-      if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500${s}';
+      if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500`$s';
       return s;
     }
     final s = v.toString();
     if (s.startsWith('http')) return s;
-    if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500${s}';
+    if (s.startsWith('/')) return 'https://cdn.thesimpsonsapi.com/500`$s';
     return s;
   }()
 "@.Replace('__IMG__', $imgField)
