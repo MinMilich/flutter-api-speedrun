@@ -2,7 +2,7 @@
 
 Generador automático universal para Flutter: le das una API y crea la app completa.
 
-## Uso (1 comando, solo la URL)
+## Uso rápido
 
 ```powershell
 irm https://raw.githubusercontent.com/MinMilich/flutter-api-speedrun/main/generar_api.ps1 -OutFile generar_api.ps1
@@ -10,48 +10,66 @@ irm https://raw.githubusercontent.com/MinMilich/flutter-api-speedrun/main/genera
 flutter run -d chrome
 ```
 
-Ejecuta el script **dentro de un proyecto Flutter** (donde exista `pubspec.yaml`). Si no tienes proyecto:
+Ejecuta dentro de un proyecto Flutter (`pubspec.yaml`). Si no existe:
 
 ```powershell
-flutter create mi_app
-cd mi_app
+flutter create mi_app; cd mi_app
 irm https://raw.githubusercontent.com/MinMilich/flutter-api-speedrun/main/generar_api.ps1 -OutFile generar_api.ps1
 .\generar_api.ps1 -Url "https://API-AQUI"
 flutter run -d chrome
 ```
 
-## Qué hace automático
-
-- Detecta si la lista viene en raíz `[ ... ]` o dentro de una clave (`results`, `data`, `docs`, etc.)
-- Detecta paginación `next` / `info.next` y la sigue (hasta `MaxPaginas`)
-- Detecta campo principal, subtítulo e imagen (string URL u objeto `medium/original/url/src`)
-- Crea modelo, servicio, pantalla lista, pantalla detalle (muestra todos los campos), main y test
-- Ejecuta `dart analyze`
-
-## Elegir qué campos mostrar/ocultar
+## Selector visual en terminal (elegir campos)
 
 ```powershell
-# Solo estos campos en el detalle
-.\generar_api.ps1 -Url "URL" -Campos "name,age,status,occupation"
-
-# Ocultar campos del detalle
-.\generar_api.ps1 -Url "URL" -Ocultar "url,created,episode"
+.\generar_api.ps1 -Url "https://thesimpsonsapi.com/api/characters?page=1" -Elegir
 ```
 
-## Parámetros opcionales
+Dentro del selector:
+- `1,3,5` alterna campos para el detalle
+- `a` todo / `n` nada
+- `t:2` define título, `s:3` subtítulo, `i:4` imagen
+- `d` continuar
+
+## Selección por parámetros
+
+```powershell
+.\generar_api.ps1 -Url "URL" -Campos "name,age,status"
+.\generar_api.ps1 -Url "URL" -Ocultar "url,created"
+```
+
+## Headers / auth
+
+```powershell
+.\generar_api.ps1 -Url "URL" -Header "Authorization: Bearer TOKEN" -Header "X-Api-Key: KEY"
+```
+
+## Parámetros
 
 | Parámetro | Descripción | Default |
 |---|---|---|
 | `-Url` | API a consumir | obligatorio |
-| `-ListKey` | Clave donde viene la lista | auto |
+| `-ListKey` | Clave de la lista | auto |
 | `-Campo` | Campo principal | auto |
-| `-Pantalla` | Nombre del widget pantalla | `ListaScreen` |
+| `-Pantalla` | Nombre widget pantalla | `ListaScreen` |
 | `-Titulo` | Título AppBar | `Lista API` |
-| `-Campos` | Campos a incluir en detalle, separados por coma | todos |
-| `-Ocultar` | Campos a ocultar en detalle, separados por coma | ninguno |
-| `-MaxPaginas` | Máximo de páginas a seguir por `next` | `5` |
+| `-Campos` | Campos a incluir en detalle | todos |
+| `-Ocultar` | Campos a ocultar en detalle | ninguno |
+| `-MaxPaginas` | Máximo páginas a seguir por `next` | `5` |
+| `-Elegir` | Selector visual en terminal | off |
+| `-Header` | Header HTTP `Clave: Valor` (repetible) | ninguno |
 
-## Límites
+## Qué genera
 
-- Funciona mejor con APIs JSON públicas que devuelven lista de objetos.
-- Casos borde que pueden requerir ajuste/IA: auth/headers, paginación por cursor no estándar, esquemas muy anidados, detalle por endpoint separado, envelopes de error con forma de lista.
+- `lib/models/item.dart` - modelo universal con `raw` y todos los campos
+- `lib/services/api_service.dart` - GET, parseo, paginación `next/info.next`, headers
+- `lib/screens/lista_screen.dart` - lista con loading/error/tap
+- `lib/screens/detalle_screen.dart` - detalle con todos los campos (o filtrados)
+- `lib/main.dart` y `test/widget_test.dart`
+
+## Límites actuales
+
+- Paginación automática: `next` / `info.next` (URL completa). Cursor/token no estándar puede requerir ajuste.
+- Auth simple por headers soportada; OAuth/flows complejos requieren ajuste.
+- Detalle por endpoint separado por item no es automático aún.
+- Esquemas muy anidados se muestran como JSON/texto en detalle.

@@ -1,12 +1,14 @@
-param(
+﻿param(
   [Parameter(Mandatory=$true)][string]$Url,
   [string]$ListKey = "",
   [string]$Campo = "",
   [string]$Pantalla = "ListaScreen",
   [string]$Titulo = "Lista API",
-  [string]$Campos = "",      # opcional: campos a mostrar en detalle, separados por coma. Ej: "name,age,status"
-  [string]$Ocultar = "",     # opcional: campos a ocultar en detalle, separados por coma
-  [int]$MaxPaginas = 5       # sigue paginación "next" hasta este límite
+  [string]$Campos = "",      # campos a mostrar en detalle, separados por coma
+  [string]$Ocultar = "",     # campos a ocultar en detalle, separados por coma
+  [int]$MaxPaginas = 5,      # sigue paginaciÃ³n "next" hasta este lÃ­mite
+  [switch]$Elegir,           # selector visual en terminal para elegir campos
+  [string[]]$Header = @()    # headers HTTP, ej: -Header "Authorization: Bearer TOKEN"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,13 +16,20 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
 if (-not (Test-Path "pubspec.yaml")) {
-  throw "No encontré pubspec.yaml en $root. Ejecuta este script dentro de un proyecto Flutter (o crea uno con: flutter create mi_app; cd mi_app)."
+  throw "No encontrÃ© pubspec.yaml en $root. Ejecuta este script dentro de un proyecto Flutter (o crea uno con: flutter create mi_app; cd mi_app)."
 }
 $pkg = (Select-String -Path "pubspec.yaml" -Pattern "^name:\s*(.+)$").Matches.Groups[1].Value.Trim()
 Write-Host "Paquete: $pkg"
 
+# Parsear headers
+$headersHt = @{}
+foreach ($h in $Header) {
+  if ($h -match '^\s*([^:]+):\s*(.*)$') { $headersHt[$Matches[1].Trim()] = $Matches[2].Trim() }
+}
+
 Write-Host "[1/5] Leyendo API..."
-$json = irm $Url
+if ($headersHt.Count -gt 0) { $json = Invoke-RestMethod -Uri $Url -Headers $headersHt }
+else { $json = irm $Url }
 
 # Detectar lista
 $list = $null
@@ -50,9 +59,9 @@ if ($json -is [System.Array]) {
   throw "Respuesta no reconocida."
 }
 
-if (-not $list -or $list.Count -eq 0) { throw "La lista está vacía." }
+if (-not $list -or $list.Count -eq 0) { throw "La lista estÃ¡ vacÃ­a." }
 
-# Detectar paginación (next)
+# Detectar paginaciÃ³n (next)
 $nextPath = ""
 if (-not $esArrayRaiz) {
   if ($json.PSObject.Properties.Name -contains 'next' -and $json.next -is [string]) { $nextPath = 'next' }
@@ -61,7 +70,7 @@ if (-not $esArrayRaiz) {
     if ($info -and ($info.PSObject.Properties.Name -contains 'next') -and $info.next -is [string]) { $nextPath = 'info.next' }
   }
 }
-if ($nextPath) { Write-Host "Paginación detectada: $nextPath (seguirá hasta $MaxPaginas páginas)" }
+if ($nextPath) { Write-Host "PaginaciÃ³n detectada: $nextPath (seguirÃ¡ hasta $MaxPaginas pÃ¡ginas)" }
 
 $sample = $list[0]
 $props = @($sample.PSObject.Properties.Name)
@@ -93,6 +102,45 @@ Write-Host "Campo imagen: $(if($imgField){$imgField}else{'(ninguno)'})"
 $subField = ""
 foreach ($p in $props) { if ($p -ne $Campo -and $p -ne $imgField) { $v=$sample.$p; if ($v -is [string] -or $v -is [int] -or $v -is [double] -or $v -is [bool]) { $subField=$p; break } } }
 Write-Host "Campo subtitulo: $(if($subField){$subField}else{'(ninguno)'})"
+
+if ($Elegir) {
+  $selected = @{}
+  foreach ($p in $props) { $selected[$p] = $true }
+  # si ya pasaron -Campos/-Ocultar, respetarlos como estado inicial
+  if ($Campos) { foreach ($p in $props) { $selected[$p] = $false }; foreach ($c in ($Campos -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) { if ($selected.ContainsKey($c)) { $selected[$c] = $true } } }
+  if ($Ocultar) { foreach ($c in ($Ocultar -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) { if ($selected.ContainsKey($c)) { $selected[$c] = $false } } }
+  while ($true) {
+    Write-Host ""
+    Write-Host "=== Selecciona campos (detalle) ===" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $props.Count; $i++) {
+      $p = $props[$i]
+      $mark = if ($selected[$p]) { "[x]" } else { "[ ]" }
+      $tags = @()
+      if ($p -eq $Campo) { $tags += "titulo" }
+      if ($p -eq $subField) { $tags += "subtitulo" }
+      if ($p -eq $imgField) { $tags += "imagen" }
+      $tagStr = if ($tags.Count -gt 0) { "  (" + ($tags -join ", ") + ")" } else { "" }
+      Write-Host ("{0,2}. {1} {2}{3}" -f ($i+1), $mark, $p, $tagStr)
+    }
+    Write-Host ""
+    Write-Host "Comandos: 1,3,5 alterna | a=todo | n=nada | t:2 titulo | s:3 subtitulo | i:4 imagen | d/listo=continuar"
+    $cmd = Read-Host ">"
+    if (-not $cmd) { break }
+    $cmd = $cmd.Trim()
+    if ($cmd -match '^(d|done|listo|ok)$') { break }
+    if ($cmd -eq 'a') { foreach ($p in $props) { $selected[$p] = $true }; continue }
+    if ($cmd -eq 'n') { foreach ($p in $props) { $selected[$p] = $false }; continue }
+    if ($cmd -match '^t:(\d+)$') { $idx = [int]$Matches[1]-1; if ($idx -ge 0 -and $idx -lt $props.Count) { $Campo = $props[$idx] }; continue }
+    if ($cmd -match '^s:(\d+)$') { $idx = [int]$Matches[1]-1; if ($idx -ge 0 -and $idx -lt $props.Count) { $subField = $props[$idx] }; continue }
+    if ($cmd -match '^i:(\d+)$') { $idx = [int]$Matches[1]-1; if ($idx -ge 0 -and $idx -lt $props.Count) { $imgField = $props[$idx] }; continue }
+    $nums = $cmd -split '[,\s]+' | Where-Object { $_ -match '^\d+$' }
+    foreach ($n in $nums) { $idx = [int]$n - 1; if ($idx -ge 0 -and $idx -lt $props.Count) { $p = $props[$idx]; $selected[$p] = -not $selected[$p] } }
+  }
+  $Campos = ($props | Where-Object { $selected[$_] }) -join ','
+  $Ocultar = ""
+  Write-Host "Campos seleccionados: $Campos"
+  Write-Host "Titulo: $Campo | Subtitulo: $subField | Imagen: $imgField"
+}
 
 Write-Host "[2/5] Agregando http..."
 flutter pub add http | Out-Null
@@ -171,6 +219,12 @@ $model = $model.Replace('__INCLUIR__', $incluirDart).Replace('__OCULTAR__', $ocu
 $model = "import 'dart:convert';`n`n" + $model
 Set-Content -Path "lib\models\item.dart" -Value $model -Encoding UTF8
 
+$dartHeadersArg = ""
+if ($headersHt.Count -gt 0) {
+  $pairs = ($headersHt.GetEnumerator() | ForEach-Object { "'$($_.Key)': '$($_.Value)'" }) -join ', '
+  $dartHeadersArg = ", headers: {$pairs}"
+}
+
 if ($nextPath -and -not $esArrayRaiz) {
   $nextExpr = if ($nextPath -eq 'info.next') { "(data['info'] as Map<String, dynamic>?)?['next']?.toString()" } else { "data['next']?.toString()" }
   $service = @"
@@ -184,7 +238,7 @@ class ApiService {
     int pages = 0;
     final all = <Item>[];
     while (nextUrl != null && nextUrl.isNotEmpty && pages < $MaxPaginas) {
-      final response = await http.get(Uri.parse(nextUrl));
+      final response = await http.get(Uri.parse(nextUrl)$dartHeadersArg);
       if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final results = data['$ListKey'] as List<dynamic>? ?? [];
@@ -206,7 +260,7 @@ import 'package:$pkg/models/item.dart';
 class ApiService {
   Future<List<Item>> getItems() async {
     final url = Uri.parse('$Url');
-    final response = await http.get(url);
+    final response = await http.get(url$dartHeadersArg);
     if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
     final results = jsonDecode(response.body) as List<dynamic>;
     return results.map((e) => Item.fromJson(e as Map<String, dynamic>)).toList();
@@ -222,7 +276,7 @@ import 'package:$pkg/models/item.dart';
 class ApiService {
   Future<List<Item>> getItems() async {
     final url = Uri.parse('$Url');
-    final response = await http.get(url);
+    final response = await http.get(url$dartHeadersArg);
     if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final results = data['$ListKey'] as List<dynamic>;
@@ -310,7 +364,7 @@ class _S_PANTALLA_State extends State<__PANTALLA__> {
                       ? Image.network(item.imageUrl, width: 56, height: 56, fit: BoxFit.cover,
                           errorBuilder: (_, _, _) => const CircleAvatar(child: Icon(Icons.image_not_supported)))
                       : CircleAvatar(child: Text('${i + 1}')),
-                  title: Text(item.title.isEmpty ? '(sin título)' : item.title),
+                  title: Text(item.title.isEmpty ? '(sin tÃ­tulo)' : item.title),
                   subtitle: item.subtitle.isEmpty ? null : Text(item.subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => DetalleScreen(item: item))),
@@ -358,3 +412,4 @@ Set-Content -Path "test\widget_test.dart" -Value $test -Encoding UTF8
 Write-Host "[4/5] Analizando..."
 dart analyze
 Write-Host "[5/5] Listo. Corre: flutter run -d chrome"
+
