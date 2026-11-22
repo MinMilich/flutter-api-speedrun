@@ -1,7 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$Url,
-  [string]$ListKey = "results",
-  [string]$Campo = "name",
+  [string]$ListKey = "",
+  [string]$Campo = "",
   [string]$Pantalla = "ListaScreen",
   [string]$Titulo = "Lista API"
 )
@@ -15,10 +15,44 @@ Write-Host "Paquete: $pkg"
 
 Write-Host "[1/5] Leyendo API..."
 $json = irm $Url
-$list = $json.$ListKey
-if (-not $list) { throw "No encontré la lista '$ListKey'. Claves: $($json.PSObject.Properties.Name -join ', ')" }
-$props = $list[0].PSObject.Properties.Name
+
+# Detectar lista
+$list = $null
+$esArrayRaiz = $false
+if ($json -is [System.Array]) {
+  $list = $json
+  $esArrayRaiz = $true
+  if (-not $ListKey) { $ListKey = "__ROOT_ARRAY__" }
+  Write-Host "Detectado: la respuesta es una lista directa."
+} else {
+  if (-not $ListKey) {
+    foreach ($p in $json.PSObject.Properties) {
+      if ($p.Value -is [System.Array] -and $p.Value.Count -gt 0) { $ListKey = $p.Name; break }
+    }
+  }
+  if (-not $ListKey) { throw "No pude detectar la lista. Claves: $($json.PSObject.Properties.Name -join ', ')" }
+  $list = $json.$ListKey
+  Write-Host "ListKey detectado: $ListKey"
+}
+
+if (-not $list -or $list.Count -eq 0) { throw "La lista está vacía." }
+$sample = $list[0]
+$props = @($sample.PSObject.Properties.Name)
 Write-Host "Campos encontrados: $($props -join ', ')"
+
+# Detectar campo
+if (-not $Campo) {
+  $preferidos = @('name','title','firstName','first_name','nombre','question','fullName','username')
+  foreach ($p in $preferidos) { if ($props -contains $p) { $Campo = $p; break } }
+  if (-not $Campo) {
+    foreach ($p in $props) {
+      $v = $sample.$p
+      if ($v -is [string] -or $v -is [ValueType]) { $Campo = $p; break }
+    }
+  }
+}
+if (-not $Campo) { throw "No pude detectar un campo para mostrar. Campos: $($props -join ', ')" }
+Write-Host "Campo elegido: $Campo"
 
 Write-Host "[2/5] Agregando http..."
 flutter pub add http | Out-Null
@@ -41,7 +75,12 @@ class Item {
 '@.Replace('__CAMPO__', $Campo)
 Set-Content -Path "lib\models\item.dart" -Value $model -Encoding UTF8
 
-$service = @'
+if ($esArrayRaiz) {
+  $parseLine = "    final results = jsonDecode(response.body) as List<dynamic>;"
+} else {
+  $parseLine = "    final data = jsonDecode(response.body) as Map<String, dynamic>;`n    final results = data['__LISTKEY__'] as List<dynamic>;"
+}
+$serviceTpl = @'
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:__PKG__/models/item.dart';
@@ -51,12 +90,12 @@ class ApiService {
     final url = Uri.parse('__URL__');
     final response = await http.get(url);
     if (response.statusCode != 200) throw Exception('Error ${response.statusCode}');
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    final results = data['__LISTKEY__'] as List<dynamic>;
+__PARSE__
     return results.map((e) => Item.fromJson(e as Map<String, dynamic>)).toList();
   }
 }
-'@.Replace('__PKG__',$pkg).Replace('__URL__',$Url).Replace('__LISTKEY__',$ListKey)
+'@
+$service = $serviceTpl.Replace('__PKG__',$pkg).Replace('__URL__',$Url).Replace('__PARSE__',$parseLine).Replace('__LISTKEY__',$ListKey)
 Set-Content -Path "lib\services\api_service.dart" -Value $service -Encoding UTF8
 
 $screen = @'
