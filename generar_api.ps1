@@ -3,13 +3,19 @@ param(
   [string]$ListKey = "",
   [string]$Campo = "",
   [string]$Pantalla = "ListaScreen",
-  [string]$Titulo = "Lista API"
+  [string]$Titulo = "Lista API",
+  [string]$Campos = "",      # opcional: campos a mostrar en detalle, separados por coma. Ej: "name,age,status"
+  [string]$Ocultar = "",     # opcional: campos a ocultar en detalle, separados por coma
+  [int]$MaxPaginas = 5       # sigue paginación "next" hasta este límite
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
+if (-not (Test-Path "pubspec.yaml")) {
+  throw "No encontré pubspec.yaml en $root. Ejecuta este script dentro de un proyecto Flutter (o crea uno con: flutter create mi_app; cd mi_app)."
+}
 $pkg = (Select-String -Path "pubspec.yaml" -Pattern "^name:\s*(.+)$").Matches.Groups[1].Value.Trim()
 Write-Host "Paquete: $pkg"
 
@@ -45,6 +51,18 @@ if ($json -is [System.Array]) {
 }
 
 if (-not $list -or $list.Count -eq 0) { throw "La lista está vacía." }
+
+# Detectar paginación (next)
+$nextPath = ""
+if (-not $esArrayRaiz) {
+  if ($json.PSObject.Properties.Name -contains 'next' -and $json.next -is [string]) { $nextPath = 'next' }
+  elseif ($json.PSObject.Properties.Name -contains 'info') {
+    $info = $json.info
+    if ($info -and ($info.PSObject.Properties.Name -contains 'next') -and $info.next -is [string]) { $nextPath = 'info.next' }
+  }
+}
+if ($nextPath) { Write-Host "Paginación detectada: $nextPath (seguirá hasta $MaxPaginas páginas)" }
+
 $sample = $list[0]
 $props = @($sample.PSObject.Properties.Name)
 Write-Host "Campos encontrados: $($props -join ', ')"
@@ -129,7 +147,13 @@ class Item {
   }
 
   List<MapEntry<String, String>> get fields {
-    return raw.entries.map((e) {
+    const incluir = <String>[__INCLUIR__];
+    const ocultar = <String>[__OCULTAR__];
+    return raw.entries.where((e) {
+      if (incluir.isNotEmpty) return incluir.contains(e.key);
+      if (ocultar.isNotEmpty) return !ocultar.contains(e.key);
+      return true;
+    }).map((e) {
       final v = e.value;
       String s;
       if (v == null) { s = 'null'; }
@@ -140,31 +164,73 @@ class Item {
   }
 }
 '@.Replace('__CAMPO__', $Campo).Replace('__SUB__', $subField).Replace('__IMGGET__', $imgGetter)
+$incluirDart = (($Campos -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | ForEach-Object { "'$_'" }) -join ', '
+$ocultarDart = (($Ocultar -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | ForEach-Object { "'$_'" }) -join ', '
+$model = $model.Replace('__INCLUIR__', $incluirDart).Replace('__OCULTAR__', $ocultarDart)
 # Need JsonEncoder import in model
 $model = "import 'dart:convert';`n`n" + $model
 Set-Content -Path "lib\models\item.dart" -Value $model -Encoding UTF8
 
-if ($esArrayRaiz) {
-  $parseLine = "    final results = jsonDecode(response.body) as List<dynamic>;"
-} else {
-  $parseLine = "    final data = jsonDecode(response.body) as Map<String, dynamic>;`n    final results = data['__LISTKEY__'] as List<dynamic>;"
-}
-$serviceTpl = @'
+if ($nextPath -and -not $esArrayRaiz) {
+  $nextExpr = if ($nextPath -eq 'info.next') { "(data['info'] as Map<String, dynamic>?)?['next']?.toString()" } else { "data['next']?.toString()" }
+  $service = @"
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:__PKG__/models/item.dart';
+import 'package:$pkg/models/item.dart';
 
 class ApiService {
   Future<List<Item>> getItems() async {
-    final url = Uri.parse('__URL__');
+    String? nextUrl = '$Url';
+    int pages = 0;
+    final all = <Item>[];
+    while (nextUrl != null && nextUrl.isNotEmpty && pages < $MaxPaginas) {
+      final response = await http.get(Uri.parse(nextUrl));
+      if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final results = data['$ListKey'] as List<dynamic>? ?? [];
+      all.addAll(results.map((e) => Item.fromJson(e as Map<String, dynamic>)));
+      final n = $nextExpr;
+      nextUrl = (n == null || n.isEmpty || n == 'null') ? null : n;
+      pages++;
+    }
+    return all;
+  }
+}
+"@
+} elseif ($esArrayRaiz) {
+  $service = @"
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:$pkg/models/item.dart';
+
+class ApiService {
+  Future<List<Item>> getItems() async {
+    final url = Uri.parse('$Url');
     final response = await http.get(url);
-    if (response.statusCode != 200) throw Exception('Error ${response.statusCode}');
-__PARSE__
+    if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
+    final results = jsonDecode(response.body) as List<dynamic>;
     return results.map((e) => Item.fromJson(e as Map<String, dynamic>)).toList();
   }
 }
-'@
-$service = $serviceTpl.Replace('__PKG__',$pkg).Replace('__URL__',$Url).Replace('__PARSE__',$parseLine).Replace('__LISTKEY__',$ListKey)
+"@
+} else {
+  $service = @"
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:$pkg/models/item.dart';
+
+class ApiService {
+  Future<List<Item>> getItems() async {
+    final url = Uri.parse('$Url');
+    final response = await http.get(url);
+    if (response.statusCode != 200) throw Exception('Error `$`{response.statusCode}');
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final results = data['$ListKey'] as List<dynamic>;
+    return results.map((e) => Item.fromJson(e as Map<String, dynamic>)).toList();
+  }
+}
+"@
+}
 Set-Content -Path "lib\services\api_service.dart" -Value $service -Encoding UTF8
 
 $detail = @'
